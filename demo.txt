@@ -1,0 +1,148 @@
+// Mark Attendance
+exports.markAttendance = (req, res) => {
+  const { prn, sessionId } = req.body;
+  const studentIp = extractIPv4(req.ip);
+
+  // Fetch the student ID and MAC address using PRN
+  const studentSql = "SELECT * FROM students WHERE prn = ?";
+  db.query(studentSql, [prn], (err, studentResult) => {
+    if (err || studentResult.length === 0) {
+      return res
+        .status(404)
+        .json({ message: "Student not found or error occurred." });
+    }
+
+    const studentId = studentResult[0].id; // Get the student ID from the result
+    const storedMacAddress = studentResult[0].mac_address; // Get the MAC address from the result
+
+    // Get MAC address of the student's device
+    getMacAddress(studentIp, (macErr, detectedMacAddress) => {
+      if (macErr) {
+        console.log("Error retrieving MAC address.");
+        return res.status(500).json({
+          message: "Error retrieving MAC address.",
+          error: macErr.message,
+        });
+      }
+
+      // Verify MAC address
+      if (storedMacAddress.toLowerCase() !== detectedMacAddress.toLowerCase()) {
+        console.log("MAC address mismatch. Attendance cannot be marked.");
+        return res.status(403).json({
+          message: "MAC address mismatch. Attendance cannot be marked.",
+        });
+      }
+
+      // Verify if student's subnet matches the faculty's session subnet
+      const sessionSql = "SELECT * FROM sessions WHERE id = ?";
+      db.query(sessionSql, [sessionId], (err, sessionResult) => {
+        if (err || sessionResult.length === 0) {
+          console.log("Session not found or error occurred.");
+          return res
+            .status(404)
+            .json({ message: "Session not found or error occurred." });
+        }
+
+        const stuBranch = studentResult[0].branch;
+        const stuDivision = studentResult[0].division;
+
+        const facultyBranch = sessionResult[0].branch;
+        const facultyDivision = sessionResult[0].division;
+
+        console.log(stuBranch, stuDivision, facultyBranch, facultyDivision);
+
+        if (!(stuBranch == facultyBranch && stuDivision == facultyDivision)) {
+          return res
+            .status(403)
+            .json({ message: "Session doest not match with your credentials" });
+        }
+
+        const facultyIp = sessionResult[0].faculty_ip;
+        const facultySubnet = getSubnet(facultyIp);
+        const studentSubnet = getSubnet(studentIp);
+
+        if (facultySubnet !== studentSubnet) {
+          return res.status(403).json({
+            message: "Access denied. Connect to the correct hotspot.",
+          });
+        }
+
+        // Check if student has already marked attendance within 10 minutes
+        const attendanceSql =
+          "SELECT * FROM attendance WHERE student_id = ? AND session_id = ? AND timestamp > NOW() - INTERVAL 10 MINUTE";
+        db.query(
+          attendanceSql,
+          [studentId, sessionId],
+          (err, attendanceResult) => {
+            if (err) {
+              return res.status(500).json({
+                message: "Error checking attendance.",
+                error: err.message,
+              });
+            }
+            if (attendanceResult.length > 0) {
+              return res
+                .status(429)
+                .json({ message: "Attendance already marked recently." });
+            }
+
+            // Mark attendance
+            const markSql =
+              "INSERT INTO attendance (student_id, session_id) VALUES (?, ?)";
+            db.query(markSql, [studentId, sessionId], (err, result) => {
+              if (err) {
+                return res.status(500).json({
+                  message: "Error marking attendance.",
+                  error: err.message,
+                });
+              }
+              res
+                .status(201)
+                .json({ message: "Attendance marked successfully." });
+            });
+          }
+        );
+      });
+    });
+  });
+};
+
+// Student Registration
+exports.registerStudent = async (req, res) => {
+  let { name, prn, rollNo, branch, division } = req.body;
+
+  if (!(name && prn && rollNo && branch && division)) {
+    return res.status(400).json({ message: "Null fields" });
+  }
+
+  const clientIp =
+    req.headers["x-forwarded-for"] || req.connection.remoteAddress;
+
+  try {
+    const macAddress = await getMacAddress(clientIp); // Await the promise
+    // const macAddress = 5237846;
+
+    let faceId = null;
+
+    const sql =
+      "INSERT INTO students (name, prn, roll_no, branch, division, mac_address, face_id) VALUES (?, ?, ?, ?, ?, ?, ?)";
+    db.query(
+      sql,
+      [name, prn, rollNo, branch, division, macAddress, faceId],
+      (err, result) => {
+        if (err) {
+          return res.status(500).json({
+            message: "Error registering student.",
+            error: err.message,
+          });
+        }
+        res.status(201).json({ message: "Student registered successfully." });
+      }
+    );
+  } catch (err) {
+    return res.status(500).json({
+      message: "Error during registration.",
+      error: err.message,
+    });
+  }
+};
